@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Local data.json
+data.json
+
+# Dependencies
+node_modules/
+
+# Build Output
+dist/
+
+# OS Junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
