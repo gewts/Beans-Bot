@@ -16,4 +16,9 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
+npm-debug.log*# Database
+beans.db
+beans.db-shm
+beans.db-wal
+src/beans.db-shm
+src/beans.db-wal
