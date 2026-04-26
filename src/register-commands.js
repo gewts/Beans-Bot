@@ -1,4 +1,3 @@
-// src/register-commands.js
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 
@@ -25,7 +24,7 @@ const open = new SlashCommandBuilder()
   .addUserOption((o) =>
     o
       .setName("user")
-      .setDescription("Admin only: view another user’s open tickets")
+      .setDescription("Admin only: view another user's open tickets")
       .setRequired(false)
   );
 
@@ -40,7 +39,6 @@ const history = new SlashCommandBuilder()
     sc
       .setName("view")
       .setDescription("View bet history")
-      // keep the option so admins can still do /history view user:<user>
       .addUserOption((o) =>
         o.setName("user").setDescription("Admin: view another user").setRequired(false)
       )
@@ -58,7 +56,6 @@ const bank = new SlashCommandBuilder()
       )
   );
 
-// PUBLIC: list only (clean mobile UX)
 const market = new SlashCommandBuilder()
   .setName("market")
   .setDescription("View current markets")
@@ -104,7 +101,7 @@ const parlay = new SlashCommandBuilder()
   .addSubcommand((sc) =>
     sc
       .setName("addline")
-      .setDescription("Add ML / SPREAD / TOTAL leg")
+      .setDescription("Add ML / SPREAD / TOTAL / TEAMTOTAL leg")
       .addStringOption((o) =>
         o
           .setName("type")
@@ -126,24 +123,23 @@ const parlay = new SlashCommandBuilder()
       )
   )
   .addSubcommand((sc) =>
-  sc
-    .setName("addprop")
-    .setDescription("Add a player prop leg (OVER only)")
-    .addStringOption((o) =>
-      o.setName("player").setDescription("Player name").setRequired(true)
-    )
-    .addStringOption((o) =>
-      o
-        .setName("stat")
-        .setDescription("Prop stat")
-        .setRequired(true)
-        .addChoices(
-          { name: "GOALS", value: "GOALS" },
-          { name: "PENALTIES", value: "PENALTIES" }
-        )
-    )
-)
-
+    sc
+      .setName("addprop")
+      .setDescription("Add a player prop leg (OVER only)")
+      .addStringOption((o) =>
+        o.setName("player").setDescription("Player name").setRequired(true)
+      )
+      .addStringOption((o) =>
+        o
+          .setName("stat")
+          .setDescription("Prop stat")
+          .setRequired(true)
+          .addChoices(
+            { name: "GOALS", value: "GOALS" },
+            { name: "PENALTIES", value: "PENALTIES" }
+          )
+      )
+  )
   .addSubcommand((sc) =>
     sc
       .setName("remove")
@@ -162,9 +158,8 @@ const parlay = new SlashCommandBuilder()
       )
   );
 
-// -------------------- HIDDEN (ADMIN/BOOK) COMMANDS --------------------
+// -------------------- BOOK / ADMIN COMMANDS --------------------
 
-// Bookmarket: create + manage tools (hidden from normal users)
 const bookmarket = new SlashCommandBuilder()
   .setName("bookmarket")
   .setDescription("Book tools: create/manage markets")
@@ -190,26 +185,19 @@ const bookmarket = new SlashCommandBuilder()
       .addStringOption((o) => o.setName("title").setDescription("Market title").setRequired(true))
       .addNumberOption((o) => o.setName("line").setDescription("Line (spread/total/prop)"))
       .addStringOption((o) => o.setName("player").setDescription("PROP only: player name"))
-      
       .addStringOption((o) =>
         o
           .setName("stat")
-          .setDescription("PROP only: stat")
+          .setDescription("PROP/TEAMTOTAL: stat type")
           .addChoices(
             { name: "GOALS", value: "GOALS" },
             { name: "PENALTIES", value: "PENALTIES" }
           )
       )
-      .addStringOption((o) =>
-        o
-          .setName("kind")
-          .setDescription("PROP only: kind")
-          .addChoices({ name: "OU", value: "OU" })
-      )
       .addStringOption((o) => o.setName("a_label").setDescription("Custom label for A side"))
       .addStringOption((o) => o.setName("b_label").setDescription("Custom label for B side"))
-      .addIntegerOption((o) => o.setName("a_odds").setDescription("American odds for A (default -110)"))
-      .addIntegerOption((o) => o.setName("b_odds").setDescription("American odds for B (default -110)"))
+      .addIntegerOption((o) => o.setName("a_odds").setDescription("American odds for A (default -120)"))
+      .addIntegerOption((o) => o.setName("b_odds").setDescription("American odds for B (default -120)"))
   )
   .addSubcommand((sc) =>
     sc
@@ -218,15 +206,11 @@ const bookmarket = new SlashCommandBuilder()
       .addIntegerOption((o) => o.setName("market_id").setDescription("Market ID").setRequired(true))
   )
   .addSubcommand((sc) =>
-  sc
-    .setName("lockall")
-    .setDescription("Lock all OPEN markets (disable betting + freeze odds)")
-)
-.addSubcommand((sc) =>
-  sc
-    .setName("unlockall")
-    .setDescription("Unlock all LOCKED markets (allow betting again)")
-)
+    sc.setName("lockall").setDescription("Lock all OPEN markets (disable betting + freeze odds)")
+  )
+  .addSubcommand((sc) =>
+    sc.setName("unlockall").setDescription("Unlock all LOCKED markets (allow betting again)")
+  )
   .addSubcommand((sc) =>
     sc
       .setName("unlock")
@@ -238,7 +222,9 @@ const bookmarket = new SlashCommandBuilder()
       .setName("odds")
       .setDescription("Freeze/unfreeze odds movement (betting still allowed if OPEN)")
       .addIntegerOption((o) => o.setName("market_id").setDescription("Market ID").setRequired(true))
-      .addBooleanOption((o) => o.setName("locked").setDescription("true = freeze, false = unfreeze").setRequired(true))
+      .addBooleanOption((o) =>
+        o.setName("locked").setDescription("true = freeze, false = unfreeze").setRequired(true)
+      )
   )
   .addSubcommand((sc) =>
     sc
@@ -264,11 +250,17 @@ const bookmarket = new SlashCommandBuilder()
           .setName("result")
           .setDescription("Result")
           .setRequired(true)
-          .addChoices({ name: "A", value: "A" }, { name: "B", value: "B" }, { name: "PUSH", value: "PUSH" })
+          .addChoices(
+            { name: "A", value: "A" },
+            { name: "B", value: "B" },
+            { name: "PUSH", value: "PUSH" }
+          )
       )
+  )
+  .addSubcommand((sc) =>
+    sc.setName("risk").setDescription("Show operator risk dashboard — open exposure by market")
   );
 
-// Admin-only bank tools (split from /bank)
 const adminbank = new SlashCommandBuilder()
   .setName("adminbank")
   .setDescription("Admin: currency controls")
@@ -278,17 +270,20 @@ const adminbank = new SlashCommandBuilder()
       .setName("give")
       .setDescription("Give currency to a user")
       .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true))
-      .addIntegerOption((o) => o.setName("amount").setDescription("Amount to give").setRequired(true).setMinValue(1))
+      .addIntegerOption((o) =>
+        o.setName("amount").setDescription("Amount to give").setRequired(true).setMinValue(1)
+      )
   )
   .addSubcommand((sc) =>
     sc
       .setName("take")
       .setDescription("Deduct currency from a user")
       .addUserOption((o) => o.setName("user").setDescription("User").setRequired(true))
-      .addIntegerOption((o) => o.setName("amount").setDescription("Amount to deduct").setRequired(true).setMinValue(1))
+      .addIntegerOption((o) =>
+        o.setName("amount").setDescription("Amount to deduct").setRequired(true).setMinValue(1)
+      )
   );
 
-// Admin-only history tools (split from /history)
 const adminhistory = new SlashCommandBuilder()
   .setName("adminhistory")
   .setDescription("Admin: history controls")
@@ -300,19 +295,17 @@ const adminhistory = new SlashCommandBuilder()
       .addUserOption((o) => o.setName("user").setDescription("User to clear").setRequired(true))
   );
 
-// Book stats (hidden)
 const book = new SlashCommandBuilder()
   .setName("book")
   .setDescription("Book operator tools")
   .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-  .addSubcommand((sc) => sc.setName("stats").setDescription("View overall settled stats / house net"));
+  .addSubcommand((sc) =>
+    sc.setName("stats").setDescription("View overall settled stats / house net")
+  );
 
 // -------------------- Register --------------------
 const commands = [
-  // public
   ping, help, open, history, bank, market, bet, parlay, leaderboard,
-
-  // hidden
   bookmarket, adminbank, adminhistory, book,
 ].map((c) => c.toJSON());
 

@@ -1,4 +1,6 @@
 require("dotenv").config();
+const fs = require("fs");
+const path = require("path");
 const {
   Client,
   GatewayIntentBits,
@@ -44,9 +46,34 @@ const MAX_WAGER = 50;
 const CONFIRM_TIMEOUT_MS = 60_000;
 const HISTORY_PAGE_FIELD_LIMIT = 1000;
 const HISTORY_PAGE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_ODDS = -120;
 
-// In-memory history page sessions (ephemeral, no need to persist)
+const ERROR_LOG_PATH = path.join(__dirname, "..", "error.log");
+
+// In-memory history page sessions
 const historyPages = {};
+
+// ---------------- Error Logging ----------------
+function logError(context, err, interaction = null) {
+  const ts = new Date().toISOString();
+  const user = interaction?.user
+    ? `${interaction.user.username}(${interaction.user.id})`
+    : "unknown";
+  const command = interaction?.commandName ?? interaction?.customId ?? "unknown";
+  const msg =
+    `[${ts}] ERROR in ${context}\n` +
+    `  User: ${user}\n` +
+    `  Command: ${command}\n` +
+    `  ${err?.stack ?? err}\n` +
+    `---\n`;
+
+  console.error(msg);
+  try {
+    fs.appendFileSync(ERROR_LOG_PATH, msg, "utf8");
+  } catch (e) {
+    console.error("Failed to write to error log:", e);
+  }
+}
 
 // ---------------- Helpers ----------------
 function hasRole(interaction, roleName) {
@@ -60,7 +87,7 @@ function fmtOdds(odds) {
 }
 
 function defaultOdds(x) {
-  return typeof x === "number" && x !== 0 ? x : -110;
+  return typeof x === "number" && x !== 0 ? x : DEFAULT_ODDS;
 }
 
 function clampOdds(x) {
@@ -76,7 +103,6 @@ function normalizeAmericanOdds(odds) {
   return odds;
 }
 
-// Applies odds movement to a market object in memory, then persists to DB
 function applyOddsStepToMarket(market, hitSide, steps = 1) {
   const A = market.picks?.A;
   const B = market.picks?.B;
@@ -166,13 +192,7 @@ function normalizeKey(s) {
 }
 
 function buildParlayPreviewEmbed(p) {
-  if (!p) {
-    return new EmbedBuilder()
-      .setTitle("🧱 Parlay Builder")
-      .setDescription("No parlay builder found.");
-  }
-
-  if (!p.legs || p.legs.length === 0) {
+  if (!p || !p.legs || p.legs.length === 0) {
     return new EmbedBuilder()
       .setTitle("🧱 Parlay Builder")
       .setDescription("No legs yet.\nUse `/parlay addline` or `/parlay addprop`.");
@@ -336,16 +356,13 @@ function computeUserLeaderboardStats(userId) {
     net += payout - p.stake;
   }
 
-  return {
-    wins, losses, pushes, net,
-    settledCount: singles.length + parlays.length,
-  };
+  return { wins, losses, pushes, net, settledCount: singles.length + parlays.length };
 }
 
-function pctTag(sideCount, total) {
+function pctBar(sideCount, total) {
   if (!total || total <= 0) return "";
   const pct = Math.round((sideCount / total) * 100);
-  return ` [${pct}% bets placed]`;
+  return `${pct}%`;
 }
 
 function marketContextLine(m) {
@@ -381,6 +398,82 @@ function marketContextLine(m) {
   return `**${m.title}**`;
 }
 
+// ---------------- Market List Embed ----------------
+function buildMarketEmbed(markets, betCounts) {
+  const embed = new EmbedBuilder()
+    .setTitle("📋 Current Markets")
+    .setColor(0x2b2d31);
+
+  if (markets.length === 0) {
+    embed.setDescription("No open or locked markets right now.");
+    return embed;
+  }
+
+  const typeOrder = ["ML", "SPREAD", "TOTAL", "TEAMTOTAL", "PROP"];
+  const typeEmoji = { ML: "🏆", SPREAD: "📐", TOTAL: "🎯", TEAMTOTAL: "📊", PROP: "🎰" };
+
+  const grouped = {};
+  for (const m of markets) {
+    if (!grouped[m.type]) grouped[m.type] = [];
+    grouped[m.type].push(m);
+  }
+
+  for (const type of typeOrder) {
+    if (!grouped[type]) continue;
+
+    for (const m of grouped[type]) {
+      const A = m.picks?.A;
+      const B = m.picks?.B;
+      const c = betCounts[m.marketId] || { A: 0, B: 0, total: 0 };
+
+      const statusIcon =
+        m.status === "LOCKED" ? "🔒" :
+        m.oddsLocked ? "🧊" : "🟢";
+
+      const header = `${typeEmoji[m.type] ?? "📌"} **#${m.marketId} — ${m.title}** ${statusIcon}`;
+
+      const contextParts = [];
+      if (m.type === "SPREAD" && typeof m.line === "number")
+        contextParts.push(`Spread: **${m.line > 0 ? "+" : ""}${m.line}**`);
+      if (m.type === "TOTAL" && typeof m.line === "number")
+        contextParts.push(`Total: **${m.line}**`);
+      if (m.type === "TEAMTOTAL" && m.teamtotal)
+        contextParts.push(`${m.teamtotal.team} **${m.teamtotal.stat}** | Line: **${m.line}**`);
+      if (m.type === "PROP" && m.prop)
+        contextParts.push(`${m.prop.player} **${m.prop.stat}** | Line: **${m.line}**`);
+
+      let pickLines = "";
+      if (m.type === "PROP") {
+        const aPct = c.total > 0 ? ` — ${pctBar(c.A, c.total)} of bets` : "";
+        pickLines = `> **A:** ${A.label} \`${fmtOdds(A.odds)}\`${aPct}`;
+      } else {
+        const aPct = c.total > 0 ? ` — ${pctBar(c.A, c.total)} of bets` : "";
+        const bPct = c.total > 0 ? ` — ${pctBar(c.B, c.total)} of bets` : "";
+        pickLines =
+          `> **A:** ${A.label} \`${fmtOdds(A.odds)}\`${aPct}\n` +
+          `> **B:** ${B.label} \`${fmtOdds(B.odds)}\`${bPct}`;
+      }
+
+      const totalBets = c.total > 0 ? `${c.total} bet${c.total === 1 ? "" : "s"} placed` : "No action yet";
+
+      const body =
+        (contextParts.length > 0 ? `${contextParts.join(" | ")}\n` : "") +
+        pickLines + "\n" +
+        `*${totalBets}*`;
+
+      embed.addFields({ name: header, value: body, inline: false });
+    }
+  }
+
+  const openCount = markets.filter((m) => m.status === "OPEN").length;
+  const lockedCount = markets.filter((m) => m.status === "LOCKED").length;
+  embed.setFooter({
+    text: `${openCount} open • ${lockedCount} locked • Odds move automatically unless 🧊 frozen`,
+  });
+
+  return embed;
+}
+
 // ---------------- Discord client ----------------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -398,85 +491,85 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // BUTTON INTERACTIONS
   // ----------------------------------------------------------------
   if (interaction.isButton()) {
-    cleanupExpiredConfirms();
-    cleanupExpiredHistoryPages();
+    try {
+      cleanupExpiredConfirms();
+      cleanupExpiredHistoryPages();
 
-    // ---- History pagination ----
-    if (
-      interaction.customId.startsWith("history_prev:") ||
-      interaction.customId.startsWith("history_next:") ||
-      interaction.customId.startsWith("history_close:")
-    ) {
-      const [action, nonce] = interaction.customId.split(":");
-      const session = historyPages[nonce];
+      // ---- History pagination ----
+      if (
+        interaction.customId.startsWith("history_prev:") ||
+        interaction.customId.startsWith("history_next:") ||
+        interaction.customId.startsWith("history_close:")
+      ) {
+        const [action, nonce] = interaction.customId.split(":");
+        const session = historyPages[nonce];
 
-      if (!session) {
-        await interaction.reply({ content: "⏰ This history view expired.", ephemeral: true });
-        return;
-      }
+        if (!session) {
+          await interaction.reply({ content: "⏰ This history view expired.", ephemeral: true });
+          return;
+        }
 
-      if (session.userId !== interaction.user.id) {
-        await interaction.reply({
-          content: "❌ Only the user who opened this history view can use these buttons.",
-          ephemeral: true,
+        if (session.userId !== interaction.user.id) {
+          await interaction.reply({
+            content: "❌ Only the user who opened this history view can use these buttons.",
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (action === "history_close") {
+          delete historyPages[nonce];
+          await interaction.update({ content: "📜 History closed.", embeds: [], components: [] });
+          return;
+        }
+
+        if (action === "history_prev") session.pageIndex = Math.max(0, session.pageIndex - 1);
+        if (action === "history_next") session.pageIndex = Math.min(session.pages.length - 1, session.pageIndex + 1);
+
+        const pageText = session.pages[session.pageIndex] || "—";
+
+        const embed = new EmbedBuilder()
+          .setTitle(session.title)
+          .setDescription(session.description)
+          .addFields(
+            { name: "Totals", value: session.totalsField, inline: true },
+            { name: "Streak / Big Swings", value: session.streakField, inline: false },
+            { name: "Settled Tickets", value: pageText, inline: false }
+          )
+          .setFooter({
+            text: `Page ${session.pageIndex + 1} of ${session.pages.length} • Settled tickets for ${session.whoName}`,
+          });
+
+        await interaction.update({
+          embeds: [embed],
+          components: [buildHistoryButtonRow(nonce, session.pageIndex, session.pages.length)],
         });
         return;
       }
 
-      if (action === "history_close") {
-        delete historyPages[nonce];
-        await interaction.update({ content: "📜 History closed.", embeds: [], components: [] });
+      // ---- Confirm / Cancel ----
+      const [kind, nonce] = interaction.customId.split(":");
+      const pending = getPendingConfirm(nonce);
+
+      if (!pending) {
+        await interaction.reply({ content: "⏰ This confirmation expired.", ephemeral: true });
         return;
       }
 
-      if (action === "history_prev") session.pageIndex = Math.max(0, session.pageIndex - 1);
-      if (action === "history_next") session.pageIndex = Math.min(session.pages.length - 1, session.pageIndex + 1);
+      if (pending.userId !== interaction.user.id) {
+        await interaction.reply({ content: "❌ This confirmation isn't for you.", ephemeral: true });
+        return;
+      }
 
-      const pageText = session.pages[session.pageIndex] || "—";
+      if (kind === "cancel") {
+        deletePendingConfirm(nonce);
+        await interaction.update({ content: "❎ Cancelled.", embeds: [], components: [] });
+        return;
+      }
 
-      const embed = new EmbedBuilder()
-        .setTitle(session.title)
-        .setDescription(session.description)
-        .addFields(
-          { name: "Totals", value: session.totalsField, inline: true },
-          { name: "Streak / Big Swings", value: session.streakField, inline: false },
-          { name: "Settled Tickets", value: pageText, inline: false }
-        )
-        .setFooter({
-          text: `Page ${session.pageIndex + 1} of ${session.pages.length} • Settled tickets for ${session.whoName}`,
-        });
+      if (kind === "confirm") {
+        deletePendingConfirm(nonce);
 
-      await interaction.update({
-        embeds: [embed],
-        components: [buildHistoryButtonRow(nonce, session.pageIndex, session.pages.length)],
-      });
-      return;
-    }
-
-    // ---- Confirm / Cancel ----
-    const [kind, nonce] = interaction.customId.split(":");
-    const pending = getPendingConfirm(nonce);
-
-    if (!pending) {
-      await interaction.reply({ content: "⏰ This confirmation expired.", ephemeral: true });
-      return;
-    }
-
-    if (pending.userId !== interaction.user.id) {
-      await interaction.reply({ content: "❌ This confirmation isn't for you.", ephemeral: true });
-      return;
-    }
-
-    if (kind === "cancel") {
-      deletePendingConfirm(nonce);
-      await interaction.update({ content: "❎ Cancelled.", embeds: [], components: [] });
-      return;
-    }
-
-    if (kind === "confirm") {
-      deletePendingConfirm(nonce);
-
-      try {
         // ---- Place straight bet ----
         if (pending.type === "bet") {
           const { marketId, pickKey, stake, oddsSnapshot } = pending.payload;
@@ -612,10 +705,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         await interaction.update({ content: "❌ Unknown confirmation type.", embeds: [], components: [] });
-      } catch (e) {
-        console.error(e);
-        await interaction.update({ content: "❌ Error placing ticket.", embeds: [], components: [] });
       }
+    } catch (e) {
+      logError("button handler", e, interaction);
+      try {
+        await interaction.reply({ content: "❌ Something went wrong. Try again.", ephemeral: true });
+      } catch { /* already replied */ }
     }
     return;
   }
@@ -795,7 +890,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------------------------------
-    // /book
+    // /book stats
     // ----------------------------------------------------------------
     if (interaction.commandName === "book") {
       const sub = interaction.options.getSubcommand();
@@ -870,7 +965,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     // ----------------------------------------------------------------
-    // /history
+    // /history view
     // ----------------------------------------------------------------
     if (interaction.commandName === "history") {
       const sub = interaction.options.getSubcommand();
@@ -1130,58 +1225,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (sub === "list") {
         const allMarkets = getAllMarkets();
-        const openOrLocked = allMarkets.filter(
-          (m) => m.status === "OPEN" || m.status === "LOCKED"
-        );
+        const openOrLocked = allMarkets
+          .filter((m) => m.status === "OPEN" || m.status === "LOCKED")
+          .sort((a, b) => a.marketId - b.marketId);
 
-        if (openOrLocked.length === 0) {
-          await interaction.reply("No markets right now.");
-          return;
-        }
-
-        const embed = new EmbedBuilder()
-          .setTitle("📋 Markets")
-          .setDescription("Showing OPEN and LOCKED markets. Odds update automatically unless frozen.");
-
-        const sorted = openOrLocked.sort((a, b) => a.marketId - b.marketId);
         const betCounts = computeMarketBetPercents();
-
-        for (const m of sorted) {
-          const A = m.picks?.A;
-          const B = m.picks?.B;
-
-          const c = betCounts[m.marketId] || { A: 0, B: 0, total: 0 };
-          const aTag = c.total > 0 ? pctTag(c.A, c.total) : "";
-          const bTag = c.total > 0 ? pctTag(c.B, c.total) : "";
-
-          const status =
-            m.status === "LOCKED" ? "🔒 LOCKED" :
-            m.oddsLocked ? "🧊 ODDS FROZEN" : "🟢 OPEN";
-
-          const header = `#${m.marketId} — ${m.type}  ${status}`;
-          let body = "";
-
-          if (m.type === "PROP" && m.prop) {
-            body += `Player: **${m.prop.player}** | Stat: **${m.prop.stat}** | Line: **${m.line}**\n`;
-          } else if (m.type === "TEAMTOTAL" && m.teamtotal) {
-            body += `Team: **${m.teamtotal.team}** | Stat: **${m.teamtotal.stat}** | Line: **${m.line}**\n`;
-          } else if (m.type === "TOTAL") {
-            body += `Line: **${m.line}**\n`;
-          } else {
-            if (m.line !== null) body += `Line: **${m.line}**\n`;
-          }
-
-          if (m.type === "PROP") {
-            body += `**A:** ${A.label} **(${fmtOdds(A.odds)})**${aTag}\n`;
-            body += `**B:** -`;
-          } else {
-            body += `**A:** ${A.label} **(${fmtOdds(A.odds)})**${aTag}\n`;
-            body += `**B:** ${B.label} **(${fmtOdds(B.odds)})**${bTag}`;
-          }
-
-          embed.addFields({ name: header, value: body, inline: false });
-        }
-
+        const embed = buildMarketEmbed(openOrLocked, betCounts);
         await interaction.reply({ embeds: [embed] });
         return;
       }
@@ -1208,7 +1257,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const line = interaction.options.getNumber("line") ?? null;
         const player = interaction.options.getString("player") ?? null;
         const stat = interaction.options.getString("stat") ?? null;
-        const kind = interaction.options.getString("kind") ?? null;
 
         let aLabel = interaction.options.getString("a_label");
         let bLabel = interaction.options.getString("b_label");
@@ -1235,16 +1283,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
             return;
           }
           if (!stat || typeof line !== "number") {
-            await interaction.reply({
-              content: "❌ TEAMTOTAL requires: stat and line.",
-              ephemeral: true,
-            });
+            await interaction.reply({ content: "❌ TEAMTOTAL requires: stat and line.", ephemeral: true });
             return;
           }
-          const statUpper = String(stat).toUpperCase();
           aLabel = aLabel ?? `Over ${line}`;
           bLabel = bLabel ?? `Under ${line}`;
-          teamtotal = { team: "Eastern", stat: statUpper, kind: "OU" };
+          teamtotal = { team: "Eastern", stat: String(stat).toUpperCase(), kind: "OU" };
         }
 
         if (type === "PROP") {
@@ -1259,7 +1303,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
           aLabel = aLabel ?? `Over ${line}`;
           bLabel = "-";
-          prop = { player, stat: statUpper, kind: kind || "OU" };
+          prop = { player, stat: statUpper, kind: "OU" };
         }
 
         if (type === "TOTAL") {
@@ -1288,9 +1332,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setTitle(`📈 ${type} Market #${market.marketId}`)
           .setDescription(
             `**${title}**` +
-            (type === "PROP" ? `\nPlayer: **${player}** | Stat: **${String(stat).toUpperCase()}** | Line: **${line}**` :
-             type === "TEAMTOTAL" ? `\nTeam: **Eastern** | Stat: **${String(stat).toUpperCase()}** | Line: **${line}**` :
-             line !== null ? `\nLine: **${line}**` : "")
+            (type === "PROP"
+              ? `\nPlayer: **${player}** | Stat: **${String(stat).toUpperCase()}** | Line: **${line}**`
+              : type === "TEAMTOTAL"
+              ? `\nTeam: **Eastern** | Stat: **${String(stat).toUpperCase()}** | Line: **${line}**`
+              : line !== null ? `\nLine: **${line}**` : "")
           )
           .addFields(
             { name: "A", value: `${aLabel}\n**${fmtOdds(market.picks.A.odds)}**`, inline: true },
@@ -1421,7 +1467,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             updateParlayLegResult(p.parlayId, marketId, legResult);
           }
 
-          // Re-fetch parlay with updated leg results
           const updated = getParlay(p.parlayId);
           const legs = updated.legs || [];
 
@@ -1446,6 +1491,103 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         updateMarketStatus(marketId, "SETTLED");
         await interaction.reply(`✅ Settled **Market #${marketId}** as **${result}**.`);
+        return;
+      }
+
+      // ---- risk ----
+      if (sub === "risk") {
+        const allMarkets = getAllMarkets();
+        const openMarkets = allMarkets.filter((m) => m.status === "OPEN" || m.status === "LOCKED");
+
+        if (openMarkets.length === 0) {
+          await interaction.reply({ content: "ℹ️ No open markets to show risk for.", ephemeral: true });
+          return;
+        }
+
+        const allOpenBets = getAllBets().filter((b) => b.status === "OPEN");
+        const allOpenParlays = getAllParlays().filter((p) => p.status === "OPEN");
+
+        const embed = new EmbedBuilder()
+          .setTitle("⚠️ Operator Risk Dashboard")
+          .setColor(0xe67e22);
+
+        let totalExposureA = 0;
+        let totalExposureB = 0;
+        let marketsWithAction = 0;
+
+        for (const m of openMarkets.sort((a, b) => a.marketId - b.marketId)) {
+          const singleBets = allOpenBets.filter((b) => b.marketId === m.marketId);
+
+          const parlayLegs = [];
+          for (const p of allOpenParlays) {
+            for (const leg of p.legs || []) {
+              if (leg.marketId === m.marketId && leg.result === "PENDING") {
+                parlayLegs.push({ ...leg, parlayStake: p.stake, parlayId: p.parlayId });
+              }
+            }
+          }
+
+          let stakeOnA = 0, stakeOnB = 0;
+          let payoutIfAWins = 0, payoutIfBWins = 0;
+
+          for (const b of singleBets) {
+            if (b.pick === "A") {
+              stakeOnA += b.stake;
+              const { payout } = calcPayout(b.stake, b.odds);
+              payoutIfAWins += payout;
+            } else {
+              stakeOnB += b.stake;
+              const { payout } = calcPayout(b.stake, b.odds);
+              payoutIfBWins += payout;
+            }
+          }
+
+          const totalStake = stakeOnA + stakeOnB;
+
+          // House net if A wins = stake collected from B bettors minus profit paid to A bettors
+          const houseIfAWins = stakeOnB - (payoutIfAWins - stakeOnA);
+          const houseIfBWins = stakeOnA - (payoutIfBWins - stakeOnB);
+
+          totalExposureA += houseIfAWins;
+          totalExposureB += houseIfBWins;
+
+          if (totalStake === 0 && parlayLegs.length === 0) continue;
+
+          marketsWithAction++;
+          const statusIcon = m.status === "LOCKED" ? "🔒" : "🟢";
+          const A = m.picks?.A;
+          const B = m.picks?.B;
+
+          const aLine = `**${A?.label ?? "A"}** \`${fmtOdds(A?.odds ?? 0)}\` — ${stakeOnA} ${CURRENCY} wagered`;
+          const bLine = `**${B?.label ?? "B"}** \`${fmtOdds(B?.odds ?? 0)}\` — ${stakeOnB} ${CURRENCY} wagered`;
+          const houseALine = `House if **A** wins: **${formatSigned(houseIfAWins)} ${CURRENCY}**`;
+          const houseBLine = `House if **B** wins: **${formatSigned(houseIfBWins)} ${CURRENCY}**`;
+
+          let fieldValue =
+            `${aLine}\n${bLine}\n` +
+            `Total action: **${totalStake} ${CURRENCY}**\n` +
+            `${houseALine} | ${houseBLine}`;
+
+          if (parlayLegs.length > 0) {
+            fieldValue += `\n*+${parlayLegs.length} parlay leg${parlayLegs.length === 1 ? "" : "s"} pending*`;
+          }
+
+          embed.addFields({
+            name: `${statusIcon} #${m.marketId} — ${m.title} [${m.type}]`,
+            value: fieldValue,
+            inline: false,
+          });
+        }
+
+        if (marketsWithAction === 0) {
+          embed.setDescription("No action on any open markets yet.");
+        }
+
+        embed.setFooter({
+          text: `Overall: If all A → ${formatSigned(totalExposureA)} ${CURRENCY} | If all B → ${formatSigned(totalExposureB)} ${CURRENCY}`,
+        });
+
+        await interaction.reply({ embeds: [embed], ephemeral: true });
         return;
       }
 
@@ -1533,7 +1675,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName === "parlay") {
       const sub = interaction.options.getSubcommand();
 
-      // ---- start ----
       if (sub === "start") {
         const existing = getBuildingParlay(interaction.user.id);
         if (existing) {
@@ -1546,7 +1687,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // ---- addline ----
       if (sub === "addline") {
         const p = getBuildingParlay(interaction.user.id);
         if (!p) { await interaction.reply({ content: "Start first: `/parlay start`", ephemeral: true }); return; }
@@ -1605,7 +1745,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // ---- addprop ----
       if (sub === "addprop") {
         const p = getBuildingParlay(interaction.user.id);
         if (!p) { await interaction.reply({ content: "Start first: `/parlay start`", ephemeral: true }); return; }
@@ -1661,7 +1800,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // ---- remove ----
       if (sub === "remove") {
         const p = getBuildingParlay(interaction.user.id);
         if (!p) { await interaction.reply({ content: "No parlay builder found. Use `/parlay start`.", ephemeral: true }); return; }
@@ -1685,7 +1823,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // ---- cancel ----
       if (sub === "cancel") {
         const p = getBuildingParlay(interaction.user.id);
         if (!p) { await interaction.reply({ content: "No parlay builder to cancel.", ephemeral: true }); return; }
@@ -1694,7 +1831,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // ---- place ----
       if (sub === "place") {
         const p = getBuildingParlay(interaction.user.id);
         if (!p) { await interaction.reply({ content: "No parlay builder found. Use `/parlay start`.", ephemeral: true }); return; }
@@ -1772,12 +1908,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.reply({ content: "Unknown command.", ephemeral: true });
 
   } catch (err) {
-    console.error(err);
-    if (interaction.replied || interaction.deferred) {
-      await interaction.followUp({ content: "❌ Error occurred. Check console.", ephemeral: true });
-    } else {
-      await interaction.reply({ content: "❌ Error occurred. Check console.", ephemeral: true });
-    }
+    logError("command handler", err, interaction);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: "❌ Something went wrong. The error has been logged.", ephemeral: true });
+      } else {
+        await interaction.reply({ content: "❌ Something went wrong. The error has been logged.", ephemeral: true });
+      }
+    } catch { /* already replied */ }
   }
 });
 
