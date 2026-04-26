@@ -22,3 +22,4 @@ beans.db-shm
 beans.db-wal
 src/beans.db-shm
 src/beans.db-wal
+error.log
